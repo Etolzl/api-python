@@ -1,22 +1,10 @@
-# Agrega al inicio del archivo
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
-
-# Configura CORS si es necesario
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pymongo import MongoClient
+import os
 import pandas as pd
 import json
 from bokeh.embed import json_item
@@ -30,16 +18,48 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from io import BytesIO
 import base64
+from dotenv import load_dotenv
 
-app = FastAPI()
+# Cargar variables de entorno (para desarrollo local)
+load_dotenv()
 
-# Configuración de MongoDB
-MONGO_URI = "mongodb+srv://ojjkd27:wsF5W5p6kq0enBAs@cluster0.dd37x83.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-client = MongoClient(MONGO_URI)
-db = client["iotdb"]
-users_col = db["users"]
-sensordatas_col = db["sensordatas"]
-entornos_col = db["entornos"]
+# Configuración de la aplicación FastAPI
+app = FastAPI(title="Visualización de Datos IoT", 
+             description="API para visualizar datos de sensores IoT")
+
+# Configuración CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+# Conexión segura a MongoDB
+def get_mongo_connection():
+    MONGO_URI = os.getenv("MONGO_URI")
+    if not MONGO_URI:
+        raise ValueError("La variable de entorno MONGO_URI no está configurada")
+    
+    try:
+        client = MongoClient(MONGO_URI, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000)
+        # Testear la conexión
+        client.admin.command('ping')
+        return client
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error de conexión a MongoDB: {str(e)}")
+
+# Obtener conexión y colecciones
+try:
+    mongo_client = get_mongo_connection()
+    db = mongo_client["iotdb"]
+    users_col = db["users"]
+    sensordatas_col = db["sensordatas"]
+    entornos_col = db["entornos"]
+except Exception as e:
+    print(f"Error inicializando MongoDB: {str(e)}")
+    raise
 
 # Configuración de templates y archivos estáticos
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -48,144 +68,193 @@ templates = Jinja2Templates(directory="templates")
 # Función para convertir gráficas matplotlib a base64
 def fig_to_base64(fig):
     buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
 
-@app.get("/", response_class=HTMLResponse)
+# Ruta principal
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-# 1. Cantidad de sensores por tipo (global y por usuario) - Seaborn
-@app.get("/plot1")
+# 1. Cantidad de sensores por tipo (global)
+@app.get("/plot1", summary="Cantidad de sensores por tipo (global)")
 async def get_plot1():
-    # Obtener y expandir sensores
-    sensores_expandido = pd.DataFrame([
-        {"usuario": s["usuario"], "tipoSensor": sensor["tipoSensor"]}
-        for s in sensordatas_col.find()
-        for sensor in s["sensores"]
-    ])
+    try:
+        # Obtener y expandir sensores con proyección para mejorar rendimiento
+        sensores_expandido = pd.DataFrame([
+            {"tipoSensor": sensor["tipoSensor"]}
+            for s in sensordatas_col.find({}, {"sensores.tipoSensor": 1})
+            for sensor in s["sensores"]
+        ])
 
-    # Conteo global
-    conteo_global = sensores_expandido["tipoSensor"].value_counts().reset_index()
-    conteo_global.columns = ["tipoSensor", "cantidad"]
+        if sensores_expandido.empty:
+            raise HTTPException(status_code=404, detail="No se encontraron datos de sensores")
 
-    plt.figure(figsize=(12, 6))
-    sns.barplot(data=conteo_global, x="tipoSensor", y="cantidad", palette="muted")
-    plt.title("Cantidad de sensores por tipo (Global)")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    
-    # Convertir a base64 para HTML
-    plot_base64 = fig_to_base64(plt)
-    plt.close()
-    
-    return {"image": plot_base64}
+        conteo_global = sensores_expandido["tipoSensor"].value_counts().reset_index()
+        conteo_global.columns = ["tipoSensor", "cantidad"]
 
-# 2. Sensores asignados vs. no asignados a entornos - Bokeh
-@app.get("/plot2")
+        plt.figure(figsize=(10, 5))
+        sns.barplot(data=conteo_global, x="tipoSensor", y="cantidad", palette="muted")
+        plt.title("Cantidad de sensores por tipo (Global)")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        plot_base64 = fig_to_base64(plt)
+        plt.close()
+        
+        return {"image": plot_base64}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. Sensores asignados vs. no asignados a entornos
+@app.get("/plot2", summary="Distribución de sensores asignados")
 async def get_plot2():
-    # Sensor IDs usados en entornos
-    ids_usados = set(sensor["idSensor"] for e in entornos_col.find() for sensor in e["sensores"])
+    try:
+        # Optimización: Solo obtener los campos necesarios
+        sensores_entornos = set()
+        for e in entornos_col.find({}, {"sensores.idSensor": 1}):
+            for sensor in e["sensores"]:
+                sensores_entornos.add(sensor["idSensor"])
 
-    # Todos los sensores en la base
-    todos_los_sensores = [sensor["idSensor"] for s in sensordatas_col.find() for sensor in s["sensores"]]
+        total_sensores = sum(1 for _ in sensordatas_col.aggregate([
+            {"$unwind": "$sensores"},
+            {"$project": {"sensores.idSensor": 1}},
+            {"$group": {"_id": None, "count": {"$sum": 1}}}
+        ]))
 
-    asignados = sum(1 for sid in todos_los_sensores if sid in ids_usados)
-    no_asignados = len(todos_los_sensores) - asignados
+        if total_sensores == 0:
+            raise HTTPException(status_code=404, detail="No se encontraron sensores")
 
-    # Crear dataset
-    data = pd.Series({"Asignados": asignados, "No asignados": no_asignados})
-    data = data.reset_index(name='value').rename(columns={'index':'categoria'})
-    data["angle"] = data["value"]/data["value"].sum() * 2*np.pi
-    data["color"] = ["#3182bd", "#6baed6"]  # Colores azules para las categorías
+        asignados = len(sensores_entornos)
+        no_asignados = total_sensores - asignados
 
-    # Crear figura Bokeh
-    p = figure(height=350, title="Sensores asignados vs no asignados", toolbar_location=None,
-               tools="hover", tooltips="@categoria: @value", x_range=(-1, 1))
+        data = pd.Series({"Asignados": asignados, "No asignados": no_asignados})
+        data = data.reset_index(name='value').rename(columns={'index':'categoria'})
+        data["angle"] = data["value"]/data["value"].sum() * 2*np.pi
+        data["color"] = ["#3182bd", "#6baed6"]
 
-    p.wedge(x=0, y=1, radius=0.4,
-            start_angle=cumsum("angle", include_zero=True),
-            end_angle=cumsum("angle"),
-            line_color="white", fill_color="color", legend_field="categoria", source=data)
+        p = figure(height=350, title="Sensores asignados vs no asignados", 
+                  toolbar_location=None, tools="hover", 
+                  tooltips="@categoria: @value", x_range=(-1, 1))
 
-    p.axis.visible = False
-    p.grid.visible = False
-    
-    return json.loads(json.dumps(json_item(p)))
+        p.wedge(x=0, y=1, radius=0.4,
+                start_angle=cumsum("angle", include_zero=True),
+                end_angle=cumsum("angle"),
+                line_color="white", fill_color="color", 
+                legend_field="categoria", source=data)
 
-# 3. Usuarios con mayor número de entornos - ggplot (plotnine)
-@app.get("/plot3")
+        p.axis.visible = False
+        p.grid.visible = False
+        
+        return json.loads(json.dumps(json_item(p)))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 3. Usuarios con mayor número de entornos
+@app.get("/plot3", summary="Top usuarios con más entornos")
 async def get_plot3():
-    # Obtener nombres de usuarios desde la colección
-    usuarios_dict = {str(u["_id"]): u["nombre"] for u in users_col.find()}
+    try:
+        usuarios_dict = {str(u["_id"]): u["nombre"] for u in users_col.find({}, {"nombre": 1})}
+        
+        pipeline = [
+            {"$group": {"_id": "$usuario", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 15}
+        ]
+        
+        top_usuarios = list(entornos_col.aggregate(pipeline))
+        if not top_usuarios:
+            raise HTTPException(status_code=404, detail="No se encontraron entornos")
 
-    # Cargar los entornos en DataFrame
-    entornos_df = pd.DataFrame(list(entornos_col.find()))
+        top15 = pd.DataFrame([{
+            "usuario": str(u["_id"]),
+            "cantidad": u["count"],
+            "nombre_usuario": usuarios_dict.get(str(u["_id"]), "Desconocido")
+        } for u in top_usuarios])
 
-    # Asegurar que la columna 'usuario' sea string para el mapeo
-    entornos_df["usuario"] = entornos_df["usuario"].astype(str)
+        plot = (ggplot(top15, aes(x="reorder(nombre_usuario, cantidad)", y="cantidad")) +
+                geom_bar(stat="identity", fill="#69b3a2") +
+                coord_flip() +
+                theme_minimal() +
+                labs(title="Top 15 usuarios con más entornos", 
+                     x="Usuario", y="Cantidad de entornos"))
+        
+        plot.save("temp_plot.png", dpi=100, verbose=False)
+        with open("temp_plot.png", "rb") as f:
+            plot_base64 = base64.b64encode(f.read()).decode("utf-8")
+        
+        return {"image": plot_base64}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Contar entornos por usuario
-    entornos_count = entornos_df["usuario"].value_counts().reset_index()
-    entornos_count.columns = ["usuario", "cantidad"]
-
-    # Mapear los nombres
-    entornos_count["nombre_usuario"] = entornos_count["usuario"].map(usuarios_dict)
-
-    # Solo mostrar los 15 con más entornos
-    top15 = entornos_count.head(15)
-
-    # Crear gráfico plotnine
-    plot = (ggplot(top15, aes(x="reorder(nombre_usuario, cantidad)", y="cantidad")) +
-            geom_bar(stat="identity", fill="#69b3a2") +
-            coord_flip() +
-            theme_minimal() +
-            labs(title="Top 15 usuarios con más entornos", x="Usuario", y="Cantidad de entornos"))
-    
-    # Guardar temporalmente y convertir a base64
-    plot.save("temp_plot.png", dpi=100)
-    with open("temp_plot.png", "rb") as f:
-        plot_base64 = base64.b64encode(f.read()).decode("utf-8")
-    
-    return {"image": plot_base64}
-
-# 4. Promedio de sensores por entorno - Plotly
-@app.get("/plot4")
+# 4. Promedio de sensores por entorno
+@app.get("/plot4", summary="Distribución de sensores por entorno")
 async def get_plot4():
-    entornos_df = pd.DataFrame(list(entornos_col.find()))
-    entornos_df["num_sensores"] = entornos_df["sensores"].apply(len)
-    entornos_usuario = entornos_df.groupby("usuario")["num_sensores"].mean().reset_index()
-    entornos_usuario.columns = ["usuario", "prom_sensores"]
+    try:
+        pipeline = [
+            {"$project": {"num_sensores": {"$size": "$sensores"}, "usuario": 1}},
+            {"$group": {"_id": "$usuario", "prom_sensores": {"$avg": "$num_sensores"}}}
+        ]
+        
+        result = list(entornos_col.aggregate(pipeline))
+        if not result:
+            raise HTTPException(status_code=404, detail="No se encontraron entornos")
 
-    fig = px.box(entornos_usuario, y="prom_sensores", title="Promedio de sensores por entorno (por usuario)")
-    fig.update_traces(marker_color="indianred")
-    
-    return fig.to_json()
+        entornos_usuario = pd.DataFrame([{
+            "usuario": str(r["_id"]),
+            "prom_sensores": r["prom_sensores"]
+        } for r in result])
 
-# 5. Proporción de tipos de sensores por entorno - Altair
-@app.get("/plot5")
+        fig = px.box(entornos_usuario, y="prom_sensores", 
+                    title="Promedio de sensores por entorno (por usuario)")
+        fig.update_traces(marker_color="indianred")
+        fig.update_layout(yaxis_title="Promedio de sensores")
+        
+        return json.loads(fig.to_json())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 5. Proporción de tipos de sensores por entorno
+@app.get("/plot5", summary="Tipos de sensores por entorno")
 async def get_plot5():
-    # Expandir sensores por entorno
-    datos = []
-    for e in entornos_col.find():
-        for s in e["sensores"]:
-            datos.append({
-                "entorno": e["nombre"],
-                "tipoSensor": s["tipoSensor"]
-            })
+    try:
+        pipeline = [
+            {"$unwind": "$sensores"},
+            {"$project": {"entorno": "$nombre", "tipoSensor": "$sensores.tipoSensor"}},
+            {"$group": {"_id": {"entorno": "$entorno", "tipo": "$tipoSensor"}, "count": {"$sum": 1}}}
+        ]
+        
+        datos = list(entornos_col.aggregate(pipeline))
+        if not datos:
+            raise HTTPException(status_code=404, detail="No se encontraron datos")
 
-    df = pd.DataFrame(datos)
+        df = pd.DataFrame([{
+            "entorno": d["_id"]["entorno"],
+            "tipoSensor": d["_id"]["tipo"],
+            "count": d["count"]
+        } for d in datos])
 
-    chart = alt.Chart(df).mark_bar().encode(
-        x=alt.X('entorno:N', sort='-y', title="Entorno"),
-        y=alt.Y('count()', title="Cantidad"),
-        color=alt.Color('tipoSensor:N', title="Tipo de sensor"),
-        tooltip=["entorno:N", "tipoSensor:N", "count()"]
-    ).properties(
-        width=700,
-        height=400,
-        title="Proporción de tipos de sensores por entorno"
-    ).interactive()
-    
-    return chart.to_dict()
+        chart = alt.Chart(df).mark_bar().encode(
+            x=alt.X('entorno:N', sort='-y', title="Entorno"),
+            y=alt.Y('count:Q', title="Cantidad"),
+            color=alt.Color('tipoSensor:N', title="Tipo de sensor"),
+            tooltip=["entorno:N", "tipoSensor:N", "count:Q"]
+        ).properties(
+            width=700,
+            height=400,
+            title="Proporción de tipos de sensores por entorno"
+        ).interactive()
+        
+        return chart.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Middleware para manejo de errores
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
