@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: iot-visualization
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
+    envVars:
+      - key: MONGO_URI
+        value: mongodb+srv://ojjkd27:wsF5W5p6kq0enBAs@cluster0.dd37x83.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
