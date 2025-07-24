@@ -15,17 +15,26 @@ from plotnine import ggplot, aes, geom_bar, coord_flip, theme_minimal, labs
 import plotly.express as px
 import altair as alt
 import seaborn as sns
+import matplotlib
 import matplotlib.pyplot as plt
 from io import BytesIO
 import base64
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Cargar variables de entorno (para desarrollo local)
+# Configuración inicial para Matplotlib
+matplotlib.use('Agg')  # Usar backend sin GUI
+plt.switch_backend('Agg')
+
+# Cargar variables de entorno
 load_dotenv()
 
 # Configuración de la aplicación FastAPI
-app = FastAPI(title="Visualización de Datos IoT", 
-             description="API para visualizar datos de sensores IoT")
+app = FastAPI(
+    title="Visualización de Datos IoT",
+    description="API para visualizar datos de sensores IoT",
+    version="1.0.0"
+)
 
 # Configuración CORS
 app.add_middleware(
@@ -44,11 +53,23 @@ def get_mongo_connection():
     
     try:
         client = MongoClient(MONGO_URI, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000)
-        # Testear la conexión
         client.admin.command('ping')
         return client
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error de conexión a MongoDB: {str(e)}")
+
+# Configuración de directorios estáticos
+static_dir = Path("static")
+if not static_dir.exists():
+    static_dir.mkdir()
+
+templates_dir = Path("templates")
+if not templates_dir.exists():
+    templates_dir.mkdir()
+
+# Configuración de templates y archivos estáticos
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # Obtener conexión y colecciones
 try:
@@ -60,10 +81,6 @@ try:
 except Exception as e:
     print(f"Error inicializando MongoDB: {str(e)}")
     raise
-
-# Configuración de templates y archivos estáticos
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
 
 # Función para convertir gráficas matplotlib a base64
 def fig_to_base64(fig):
@@ -81,7 +98,6 @@ async def read_root(request: Request):
 @app.get("/plot1", summary="Cantidad de sensores por tipo (global)")
 async def get_plot1():
     try:
-        # Obtener y expandir sensores con proyección para mejorar rendimiento
         sensores_expandido = pd.DataFrame([
             {"tipoSensor": sensor["tipoSensor"]}
             for s in sensordatas_col.find({}, {"sensores.tipoSensor": 1})
@@ -111,7 +127,6 @@ async def get_plot1():
 @app.get("/plot2", summary="Distribución de sensores asignados")
 async def get_plot2():
     try:
-        # Optimización: Solo obtener los campos necesarios
         sensores_entornos = set()
         for e in entornos_col.find({}, {"sensores.idSensor": 1}):
             for sensor in e["sensores"]:
@@ -258,3 +273,8 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     return response
+
+# Para ejecución local
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
