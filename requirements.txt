@@ -11,3 +11,4 @@ plotly
 altair
 jinja2
 python-multipart
+python-dotenv
