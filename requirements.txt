@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pymongo
+pandas
+numpy
+matplotlib
+seaborn
+bokeh
+plotnine
+plotly
+altair
+jinja2
+python-multipart
