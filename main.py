@@ -159,16 +159,21 @@ async def get_plot1():
         conteo_global = sensores_expandido["tipoSensor"].value_counts().reset_index()
         conteo_global.columns = ["tipoSensor", "cantidad"]
 
-        plt.figure(figsize=(10, 5))
-        sns.barplot(data=conteo_global, x="tipoSensor", y="cantidad", palette="muted")
-        plt.title("Cantidad de sensores por tipo (Global)")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        plot_base64 = fig_to_base64(plt)
-        plt.close()
-        
-        return {"image": plot_base64}
+        # Ordenar y construir gráfica interactiva con Plotly (ya presente en el proyecto)
+        conteo_global = conteo_global.sort_values("cantidad", ascending=False)
+
+        fig = px.bar(
+            conteo_global,
+            x="tipoSensor",
+            y="cantidad",
+            title="Cantidad de sensores por tipo (Global)",
+            labels={"tipoSensor": "Tipo de sensor", "cantidad": "Cantidad"},
+            color="cantidad",
+            color_continuous_scale="Blues",
+        )
+        fig.update_layout(xaxis_tickangle=-45, yaxis_title="Cantidad", xaxis_title="Tipo de sensor")
+
+        return json.loads(fig.to_json())
     except HTTPException:
         raise
     except Exception as e:
@@ -248,22 +253,25 @@ async def get_plot3():
             "nombre_usuario": usuarios_dict.get(str(u["_id"]), "Desconocido")
         } for u in top_usuarios])
 
-        plot = (ggplot(top15, aes(x="reorder(nombre_usuario, cantidad)", y="cantidad")) +
-                geom_bar(stat="identity", fill="#69b3a2") +
-                coord_flip() +
-                theme_minimal() +
-                labs(title="Top 15 usuarios con más entornos", 
-                     x="Usuario", y="Cantidad de entornos"))
-        
-        temp_file = "temp_plot.png"
-        plot.save(temp_file, dpi=100, verbose=False)
-        with open(temp_file, "rb") as f:
-            plot_base64 = base64.b64encode(f.read()).decode("utf-8")
-        
-        # Eliminar archivo temporal
-        Path(temp_file).unlink(missing_ok=True)
-        
-        return {"image": plot_base64}
+        # Gráfica interactiva con Altair (ya presente en el proyecto)
+        chart = (
+            alt.Chart(top15)
+            .mark_bar()
+            .encode(
+                x=alt.X("cantidad:Q", title="Cantidad de entornos"),
+                y=alt.Y("nombre_usuario:N", sort='-x', title="Usuario"),
+                tooltip=["nombre_usuario:N", "cantidad:Q"],
+                color=alt.value("#69b3a2"),
+            )
+            .properties(
+                width=700,
+                height=400,
+                title="Top 15 usuarios con más entornos",
+            )
+            .interactive()
+        )
+
+        return chart.to_dict()
     except HTTPException:
         raise
     except Exception as e:
